@@ -1,17 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
-
-
-# INPUT LAYER
-# @dataclass
-# class FullVideo:
-#     """Initial object created from video file"""
-
-#     path: str
-#     duration: float  # seconds
-#     fps: float
-#     resolution: Tuple[int, int]  # (width, height)
-#     audio_path: str  # extracted audio file
+from typing import List, Optional
 
 
 @dataclass
@@ -39,10 +27,13 @@ class AudioClip:
 
 @dataclass
 class VideoClip:
-    """Keyframes from a VideoCut (via Katna)"""
+    """Represents extracted video frames with metadata."""
 
-    keyframes: List[str]  # List of Paths in the S3 Bucket.
-    source_cut: VideoCut
+    start: float
+    end: float
+    keyframes: List[str]  # S3 paths to keyframe images
+    timestamps: Optional[List[float]] = None  # Timestamp for each keyframe
+    source_cut: Optional[VideoCut] = None
 
 
 # OUTPUT LAYER: Analysis Results
@@ -67,15 +58,6 @@ class VisualAnalysis:
 
 
 @dataclass
-class OCRText:
-    """On-screen text from a keyframe"""
-
-    text: str
-    confidence: float
-    timestamp: float
-
-
-@dataclass
 class Scene:
     """Analysis results for one VideoCut"""
 
@@ -87,7 +69,6 @@ class Scene:
     # Analysis results (populated by analyzers)
     transcripts: List[Transcript]
     visual_analyses: List[VisualAnalysis]
-    ocr_texts: List[OCRText]
 
 
 @dataclass

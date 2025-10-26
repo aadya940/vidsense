@@ -1,18 +1,15 @@
 from typing import List, Tuple
-import ffmpeg
 import boto3
 import os
 from io import BytesIO
 import tempfile
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+import cv2
+import numpy as np
+import ffmpeg
 
-from scenedetect import open_video, SceneManager, FrameTimecode
-from scenedetect.detectors import ContentDetector
-from scenedetect.scene_manager import save_images
-
-from .datamodel import VideoCut, AudioClip, VideoClip
-
+from .datamodel import AudioClip, VideoClip
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,106 +23,161 @@ s3 = boto3.client(
 )
 
 
-def extract_content_aware_frames(
+def calculate_frame_difference(frame1, frame2):
+    """Calculate difference between two frames."""
+    if frame1 is None or frame2 is None:
+        return 0
+
+    # Convert to grayscale and calculate absolute difference
+    gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+
+    diff = cv2.absdiff(gray1, gray2)
+    return np.mean(diff)
+
+
+def extract_best_frames_fast(
     video_path: str,
     output_dir: str,
-    start_time: float,
-    duration: float,
-    threshold: float = 5,
-) -> List[str]:
-    """Finds content-based scene changes *only within a specific time segment*
-    and saves the first frame of each new scene.
-    """
-    video = open_video(video_path)
+    num_frames: int = 50,
+    sample_rate: int = 10,
+) -> List[Tuple[str, float]]:
+    """Fast extraction of visually distinct frames by sampling.
 
-    fps = video.frame_rate
-
-    start_frame = FrameTimecode(timecode=start_time, fps=fps)
-    end_frame = FrameTimecode(timecode=start_time + duration, fps=fps)
-
-    video.seek(start_frame)
-
-    scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector(threshold=threshold))
-
-    print(
-        f"Detecting scenes from {start_frame.get_timecode()} to {end_frame.get_timecode()}..."
-    )
-
-    scene_manager.detect_scenes(video, end_time=end_frame, show_progress=False)
-
-    scene_list = scene_manager.get_scene_list()
-
-    # 4. Save the images
-    if scene_list:
-        print(f"Saving {len(scene_list)} keyframe(s) to '{output_dir}'...")
-
-        image_paths_dict = save_images(
-            scene_list=scene_list,  # 1st arg: The list of scenes
-            video=video,  # 2nd arg: The video object
-            num_images=1,  # Get 1 image per scene
-            output_dir=output_dir,
-            image_name_template="$SCENE_NUMBER-$FRAME_NUMBER",
-        )
-
-        # The doc says the return is a dict: {scene_num: [list_of_paths]}
-        # We need to flatten this list of lists.
-        all_paths = []
-        for path_list in image_paths_dict.values():
-            for relative_path in path_list:
-                full_path = os.path.join(output_dir, relative_path)
-                all_paths.append(full_path)
-
-        return sorted(all_paths)
-
-    else:
-        print("No new scenes detected in this segment.")
-        return []
-
-
-def process_single_cut(cut: VideoCut) -> Tuple[AudioClip, VideoClip]:
-    """Process one cut with parallel uploads.
+    Args:
+        video_path: Path to source video
+        output_dir: Directory to save keyframes
+        num_frames: Total number of frames to extract
+        sample_rate: Analyze every Nth frame (higher = faster but less accurate)
 
     Returns:
-        Tuple[AudioClip, VideoClip]
+        List of tuples (frame_path, timestamp_in_seconds)
     """
-    start_time = cut.start
-    duration = cut.end - cut.start
+    os.makedirs(output_dir, exist_ok=True)
+
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = total_frames / fps
+
+    print(f"Video: {duration:.1f}s, {total_frames} frames @ {fps:.1f}fps")
+    print(f"Sampling every {sample_rate} frames for speed...")
+
+    frame_scores = []
+    prev_frame = None
+    frame_num = 0
+
+    # Sample frames and calculate content scores
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Only process every Nth frame
+        if frame_num % sample_rate == 0:
+            # Score based on difference from previous frame
+            score = calculate_frame_difference(prev_frame, frame)
+            timestamp = frame_num / fps
+
+            frame_scores.append(
+                {
+                    "frame_num": frame_num,
+                    "timestamp": timestamp,
+                    "score": score,
+                    "frame": frame.copy(),  # Store the frame
+                }
+            )
+
+            prev_frame = frame
+
+            if len(frame_scores) % 100 == 0:
+                print(f"  Sampled {len(frame_scores)} frames...")
+
+        frame_num += 1
+
+    cap.release()
+
+    print(f"Analyzed {len(frame_scores)} sampled frames, selecting top {num_frames}...")
+
+    # Sort by score and select top N
+    frame_scores.sort(key=lambda x: x["score"], reverse=True)
+    selected = frame_scores[:num_frames]
+
+    # Sort selected frames chronologically
+    selected.sort(key=lambda x: x["frame_num"])
+
+    # Save selected frames
+    keyframe_data = []
+    for idx, frame_info in enumerate(selected):
+        output_path = os.path.join(output_dir, f"frame_{idx:04d}.jpg")
+        cv2.imwrite(output_path, frame_info["frame"])
+        keyframe_data.append((output_path, frame_info["timestamp"]))
+
+        if (idx + 1) % 10 == 0:
+            print(f"  Saved {idx + 1}/{num_frames} keyframes...")
+
+    print(f"✓ Extracted {len(keyframe_data)} best frames")
+
+    return keyframe_data
+
+
+def separator(
+    video_path: str, num_frames: int = 40, sample_rate: int = 10
+) -> Tuple[AudioClip, VideoClip]:
+    """Extract best frames and audio from entire video (fast version).
+
+    Args:
+        video_path:
+            Path to video file
+        num_frames:
+            Number of keyframes to extract
+        sample_rate:
+            Analyze every Nth frame (10 = 10x faster)
+
+    Returns:
+        Tuple of (AudioClip, VideoClip) for the entire video
+    """
+
+    print(f"Processing video: {video_path}")
+    print(f"Extracting {num_frames} best frames (sample rate: 1/{sample_rate})...")
 
     temp_dir = tempfile.mkdtemp()
-    # No more 'segment_path'
     keyframes_dir = os.path.join(temp_dir, "keyframes")
     os.makedirs(keyframes_dir, exist_ok=True)
 
     try:
-        # 1. Extract keyframes directly from the source video
-        keyframe_files = extract_content_aware_frames(
-            video_path=cut.local_source_video,
+        # 1. Extract best frames (fast!)
+        keyframe_data = extract_best_frames_fast(
+            video_path=video_path,
             output_dir=keyframes_dir,
-            start_time=start_time,
-            duration=duration,
+            num_frames=num_frames,
+            sample_rate=sample_rate,
         )
 
-        # 2. Extract audio directly from the source video
+        # 2. Get video duration
+        probe = ffmpeg.probe(video_path)
+        duration = float(probe["format"]["duration"])
+
+        # 3. Extract audio from entire video
+        print("Extracting audio...")
         audio_out, _ = (
-            ffmpeg.input(
-                cut.local_source_video, ss=start_time, t=duration
-            )  # Pass ss/t here
+            ffmpeg.input(video_path)
             .output("pipe:", format="mp3", acodec="libmp3lame", vn=None)
             .run(capture_stdout=True, capture_stderr=True)
         )
 
-        # Parallel S3 uploads (this part doesn't change)
+        # 4. Upload to S3 in parallel
+        print("Uploading to S3...")
         with ThreadPoolExecutor(max_workers=16) as upload_executor:
             upload_futures = []
 
             # Upload keyframes
-            for idx, kf_path in enumerate(keyframe_files):
+            for idx, (kf_path, timestamp) in enumerate(keyframe_data):
                 future = upload_executor.submit(
                     s3.upload_file,
                     kf_path,
                     "aws-hack-bucket",
-                    f"keyframes/{cut.cut_id}_{idx}.jpg",
+                    f"keyframes/video_{idx}.jpg",
                 )
                 upload_futures.append(future)
 
@@ -134,7 +186,7 @@ def process_single_cut(cut: VideoCut) -> Tuple[AudioClip, VideoClip]:
                 s3.upload_fileobj,
                 BytesIO(audio_out),
                 "aws-hack-bucket",
-                f"audio/{cut.cut_id}.mp3",
+                f"audio/video_full.mp3",
             )
             upload_futures.append(audio_future)
 
@@ -142,53 +194,26 @@ def process_single_cut(cut: VideoCut) -> Tuple[AudioClip, VideoClip]:
             for future in upload_futures:
                 future.result()
 
-        _audio_clip = AudioClip(
-            audio_data=[f"audio/{cut.cut_id}.mp3"],
-            start=start_time,
-            end=start_time + duration,
-            source_cut=cut,
+        audio_clip = AudioClip(
+            audio_data=[f"audio/video_full.mp3"],
+            start=0,
+            end=duration,
+            source_cut=None,
         )
 
-        _video_clip = VideoClip(
+        # Store both keyframe paths and their timestamps
+        video_clip = VideoClip(
+            start=0,
+            end=duration,
             keyframes=[
-                f"keyframes/{cut.cut_id}_{idx}.jpg"
-                for idx in range(len(keyframe_files))
+                f"keyframes/video_{idx}.jpg" for idx in range(len(keyframe_data))
             ],
-            source_cut=cut,
+            timestamps=[timestamp for _, timestamp in keyframe_data],  # Add timestamps
+            source_cut=None,
         )
 
-        return _audio_clip, _video_clip
+        print("✓ Processing complete!")
+        return audio_clip, video_clip
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def separator(video_cuts: List[VideoCut], max_workers: int = 4) -> None:
-    """Process cuts in parallel but report in chronological order"""
-
-    print(f"Processing {len(video_cuts)} cuts with {max_workers} workers...")
-    audio_clips = []
-    video_clips = []
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all jobs
-        futures = [executor.submit(process_single_cut, cut) for cut in video_cuts]
-
-        # Wait for results IN ORDER
-        for i, future in enumerate(futures):
-            try:
-                audio_clip, video_clip = (
-                    future.result()
-                )  # Blocks until THIS cut completes
-
-                print(
-                    f"✓ Cut {i+1}/{len(video_cuts)} ({video_cuts[i].cut_id}) complete"
-                )
-
-                audio_clips.append(audio_clip)
-                video_clips.append(video_clip)
-            except Exception as e:
-                print(f"✗ Cut {i+1} ({video_cuts[i].cut_id}) failed: {e}")
-
-    print("All cuts processed!")
-    return audio_clips, video_clips
