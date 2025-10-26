@@ -3,15 +3,15 @@ from typing import List, Tuple
 
 
 # INPUT LAYER
-@dataclass
-class FullVideo:
-    """Initial object created from video file"""
+# @dataclass
+# class FullVideo:
+#     """Initial object created from video file"""
 
-    path: str
-    duration: float  # seconds
-    fps: float
-    resolution: Tuple[int, int]  # (width, height)
-    audio_path: str  # extracted audio file
+#     path: str
+#     duration: float  # seconds
+#     fps: float
+#     resolution: Tuple[int, int]  # (width, height)
+#     audio_path: str  # extracted audio file
 
 
 @dataclass
@@ -23,7 +23,8 @@ class VideoCut:
     end: float
     start_frame: int
     end_frame: int
-    source_video: FullVideo
+    source_video: str
+    local_source_video: str
 
 
 @dataclass
@@ -93,7 +94,7 @@ class Scene:
 class VideoTimeline:
     """Complete understanding of the video"""
 
-    source_video: FullVideo
+    source_video: str
     scenes: List[Scene]
 
 

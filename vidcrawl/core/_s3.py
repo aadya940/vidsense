@@ -1,7 +1,8 @@
 import os
 import boto3
 from botocore.exceptions import ClientError
-
+from dotenv import load_dotenv
+load_dotenv()
 
 def _s3_file_exists(s3_client, bucket, key):
     """Check if a file exists in S3 without downloading it."""
