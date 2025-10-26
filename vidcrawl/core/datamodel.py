@@ -29,9 +29,9 @@ class VideoCut:
 
 @dataclass
 class AudioClip:
-    """Audio segment for a VideoCut"""
+    """Audio segment for a VideoCut."""
 
-    audio_data: bytes  # or path to audio segment
+    audio_data: List[str]  # List of Paths in the S3 Bucket.
     start: float
     end: float
     source_cut: VideoCut
@@ -41,7 +41,7 @@ class AudioClip:
 class VideoClip:
     """Keyframes from a VideoCut (via Katna)"""
 
-    keyframes: List[Tuple[float, bytes]]  # [(timestamp, image_data), ...]
+    keyframes: List[str]  # List of Paths in the S3 Bucket.
     source_cut: VideoCut
 
 

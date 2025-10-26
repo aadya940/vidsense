@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 import ffmpeg
 import boto3
 import os
@@ -11,9 +11,10 @@ from scenedetect import open_video, SceneManager, FrameTimecode
 from scenedetect.detectors import ContentDetector
 from scenedetect.scene_manager import save_images
 
-from .datamodel import VideoCut
+from .datamodel import VideoCut, AudioClip, VideoClip
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 s3 = boto3.client(
@@ -26,49 +27,47 @@ s3 = boto3.client(
 
 
 def extract_content_aware_frames(
-    video_path: str, 
-    output_dir: str, 
-    start_time: float, 
-    duration: float, 
-    threshold: float = 5
+    video_path: str,
+    output_dir: str,
+    start_time: float,
+    duration: float,
+    threshold: float = 5,
 ) -> List[str]:
     """Finds content-based scene changes *only within a specific time segment*
     and saves the first frame of each new scene.
     """
     video = open_video(video_path)
-    
+
     fps = video.frame_rate
-    
+
     start_frame = FrameTimecode(timecode=start_time, fps=fps)
     end_frame = FrameTimecode(timecode=start_time + duration, fps=fps)
 
     video.seek(start_frame)
-    
+
     scene_manager = SceneManager()
     scene_manager.add_detector(ContentDetector(threshold=threshold))
 
-    print(f"Detecting scenes from {start_frame.get_timecode()} to {end_frame.get_timecode()}...")
-    
-    scene_manager.detect_scenes(
-        video, 
-        end_time=end_frame,
-        show_progress=False 
+    print(
+        f"Detecting scenes from {start_frame.get_timecode()} to {end_frame.get_timecode()}..."
     )
+
+    scene_manager.detect_scenes(video, end_time=end_frame, show_progress=False)
 
     scene_list = scene_manager.get_scene_list()
 
     # 4. Save the images
     if scene_list:
         print(f"Saving {len(scene_list)} keyframe(s) to '{output_dir}'...")
-        
+
         image_paths_dict = save_images(
-            scene_list=scene_list,      # 1st arg: The list of scenes
-            video=video,                # 2nd arg: The video object
-            num_images=1,               # Get 1 image per scene
+            scene_list=scene_list,  # 1st arg: The list of scenes
+            video=video,  # 2nd arg: The video object
+            num_images=1,  # Get 1 image per scene
             output_dir=output_dir,
-            image_name_template='$SCENE_NUMBER-$FRAME_NUMBER'
+            image_name_template="$SCENE_NUMBER-$FRAME_NUMBER",
         )
-        
+
         # The doc says the return is a dict: {scene_num: [list_of_paths]}
         # We need to flatten this list of lists.
         all_paths = []
@@ -76,16 +75,20 @@ def extract_content_aware_frames(
             for relative_path in path_list:
                 full_path = os.path.join(output_dir, relative_path)
                 all_paths.append(full_path)
-        
+
         return sorted(all_paths)
-        
+
     else:
         print("No new scenes detected in this segment.")
         return []
 
 
-def process_single_cut(cut: VideoCut) -> None:
-    """Process one cut with parallel uploads"""
+def process_single_cut(cut: VideoCut) -> Tuple[AudioClip, VideoClip]:
+    """Process one cut with parallel uploads.
+
+    Returns:
+        Tuple[AudioClip, VideoClip]
+    """
     start_time = cut.start
     duration = cut.end - cut.start
 
@@ -139,6 +142,23 @@ def process_single_cut(cut: VideoCut) -> None:
             for future in upload_futures:
                 future.result()
 
+        _audio_clip = AudioClip(
+            audio_data=[f"audio/{cut.cut_id}.mp3"],
+            start=start_time,
+            end=start_time + duration,
+            source_cut=cut,
+        )
+
+        _video_clip = VideoClip(
+            keyframes=[
+                f"keyframes/{cut.cut_id}_{idx}.jpg"
+                for idx in range(len(keyframe_files))
+            ],
+            source_cut=cut,
+        )
+
+        return _audio_clip, _video_clip
+
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -147,6 +167,8 @@ def separator(video_cuts: List[VideoCut], max_workers: int = 4) -> None:
     """Process cuts in parallel but report in chronological order"""
 
     print(f"Processing {len(video_cuts)} cuts with {max_workers} workers...")
+    audio_clips = []
+    video_clips = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all jobs
@@ -155,11 +177,18 @@ def separator(video_cuts: List[VideoCut], max_workers: int = 4) -> None:
         # Wait for results IN ORDER
         for i, future in enumerate(futures):
             try:
-                future.result()  # Blocks until THIS cut completes
+                audio_clip, video_clip = (
+                    future.result()
+                )  # Blocks until THIS cut completes
+
                 print(
                     f"✓ Cut {i+1}/{len(video_cuts)} ({video_cuts[i].cut_id}) complete"
                 )
+
+                audio_clips.append(audio_clip)
+                video_clips.append(video_clip)
             except Exception as e:
                 print(f"✗ Cut {i+1} ({video_cuts[i].cut_id}) failed: {e}")
 
     print("All cuts processed!")
+    return audio_clips, video_clips

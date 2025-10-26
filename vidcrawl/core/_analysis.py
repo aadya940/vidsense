@@ -1,4 +1,3 @@
 import boto3
 
-rekognition = boto3.client('rekognition')
-
+transcribe_client = boto3.client("transcribe")
