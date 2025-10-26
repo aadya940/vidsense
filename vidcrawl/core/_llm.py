@@ -124,9 +124,12 @@ def analyse_images(
     Analyze video clips with optimized settings.
 
     Args:
-        video_clips: Single VideoClip or list of VideoClip objects
-        model_id: Bedrock model ID
-        max_frames: Maximum frames to send (affects cost/speed)
+        video_clips: 
+            Single VideoClip or list of VideoClip objects
+        model_id: 
+            Bedrock model ID
+        max_frames: 
+            Maximum frames to send (affects cost/speed)
 
     Model options (ordered by speed):
     - "us.amazon.nova-lite-v1:0" (fastest, cheapest)

@@ -4,7 +4,7 @@ import os
 from io import BytesIO
 import tempfile
 import shutil
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import cv2
 import numpy as np
 import ffmpeg
@@ -40,86 +40,86 @@ def extract_best_frames_fast(
     video_path: str,
     output_dir: str,
     num_frames: int = 50,
-    sample_rate: int = 10,
+    sample_rate: int = 20  # Increase for speed
 ) -> List[Tuple[str, float]]:
-    """Fast extraction of visually distinct frames by sampling.
-
-    Args:
-        video_path: Path to source video
-        output_dir: Directory to save keyframes
-        num_frames: Total number of frames to extract
-        sample_rate: Analyze every Nth frame (higher = faster but less accurate)
-
-    Returns:
-        List of tuples (frame_path, timestamp_in_seconds)
     """
+    Optimized frame extraction using direct seeking.
+    
+    IMPROVEMENTS:
+    - Seek directly to frame positions (don't read all frames)
+    - Higher sample rate (20 instead of 10)
+    - Parallel frame saving
+    - Lower JPEG quality for faster I/O    
+    """
+    
     os.makedirs(output_dir, exist_ok=True)
-
+    
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = total_frames / fps
-
-    print(f"Video: {duration:.1f}s, {total_frames} frames @ {fps:.1f}fps")
-    print(f"Sampling every {sample_rate} frames for speed...")
-
+    
+    print(f"Optimized extraction: sampling every {sample_rate} frames")
+    
     frame_scores = []
     prev_frame = None
-    frame_num = 0
-
-    # Sample frames and calculate content scores
-    while True:
+    
+    # Phase 1: Score frames (with seeking)
+    for frame_num in range(0, total_frames, sample_rate):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         ret, frame = cap.read()
         if not ret:
             break
-
-        # Only process every Nth frame
-        if frame_num % sample_rate == 0:
-            # Score based on difference from previous frame
-            score = calculate_frame_difference(prev_frame, frame)
-            timestamp = frame_num / fps
-
-            frame_scores.append(
-                {
-                    "frame_num": frame_num,
-                    "timestamp": timestamp,
-                    "score": score,
-                    "frame": frame.copy(),  # Store the frame
-                }
-            )
-
-            prev_frame = frame
-
-            if len(frame_scores) % 100 == 0:
-                print(f"  Sampled {len(frame_scores)} frames...")
-
-        frame_num += 1
-
+        
+        # Simple scoring (can be even faster with lower resolution)
+        if prev_frame is not None:
+            gray1 = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            score = np.mean(cv2.absdiff(gray1, gray2))
+        else:
+            score = 0
+        
+        frame_scores.append({
+            'frame_num': frame_num,
+            'timestamp': frame_num / fps,
+            'score': score,
+        })
+        prev_frame = frame
+    
     cap.release()
-
-    print(f"Analyzed {len(frame_scores)} sampled frames, selecting top {num_frames}...")
-
-    # Sort by score and select top N
-    frame_scores.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Phase 2: Select and save best frames
+    frame_scores.sort(key=lambda x: x['score'], reverse=True)
     selected = frame_scores[:num_frames]
-
-    # Sort selected frames chronologically
-    selected.sort(key=lambda x: x["frame_num"])
-
-    # Save selected frames
+    selected.sort(key=lambda x: x['frame_num'])
+    
+    # Phase 3: Parallel frame extraction and saving
+    def extract_and_save(frame_info, idx):
+        cap_local = cv2.VideoCapture(video_path)
+        cap_local.set(cv2.CAP_PROP_POS_FRAMES, frame_info['frame_num'])
+        ret, frame = cap_local.read()
+        cap_local.release()
+        
+        if ret:
+            output_path = os.path.join(output_dir, f"frame_{idx:04d}.jpg")
+            # Lower quality for faster I/O (80 instead of 95)
+            cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            return (output_path, frame_info['timestamp'])
+        return None
+    
     keyframe_data = []
-    for idx, frame_info in enumerate(selected):
-        output_path = os.path.join(output_dir, f"frame_{idx:04d}.jpg")
-        cv2.imwrite(output_path, frame_info["frame"])
-        keyframe_data.append((output_path, frame_info["timestamp"]))
-
-        if (idx + 1) % 10 == 0:
-            print(f"  Saved {idx + 1}/{num_frames} keyframes...")
-
-    print(f"✓ Extracted {len(keyframe_data)} best frames")
-
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(extract_and_save, info, idx)
+            for idx, info in enumerate(selected)
+        ]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                keyframe_data.append(result)
+    
+    # Sort by timestamp
+    keyframe_data.sort(key=lambda x: x[1])
     return keyframe_data
-
 
 def separator(
     video_path: str, num_frames: int = 40, sample_rate: int = 10
